@@ -11,7 +11,7 @@ from bleak import BleakScanner, BleakClient
 from bleak.exc import BleakError
 from nacl.public import PrivateKey
 from nacl.encoding import HexEncoder
-from nacl.bindings import crypto_scalarmult
+from nacl.bindings import crypto_scalarmult, crypto_scalarmult_base
 from proto import encrypt_key_pb2, encrypt_key_pb2_grpc
 
 try:
@@ -25,7 +25,7 @@ except ImportError:
 from device_profiles import DEVICE_PROFILES, APP_INFO, CURRENT_DEVICE
 from pump.constants import CHAR_AUTH_PASSWORD, CHAR_MASTER_VERSION, CHAR_BASE_VERSION, CHAR_SETTINGS_VERSION, CHAR_HISTORY_VERSION
 from pump.utils import compute_password
-from pump.server_blob import build_challenge_response
+from pump.server_blob import build_challenge_response, server_shared_key
 
 SALT = bytes([0x4F, 0xC2, 0x45, 0x4D, 0x9B, 0x81, 0x59, 0xA4, 0x93, 0xBB])
 KEY_FILE = Path("ypsopump_keys.json")
@@ -439,8 +439,9 @@ async def main():
 
             if offline:
                 print("\n=== Building Challenge Response (offline) ===")
+                server_pub = crypto_scalarmult_base(server_key[1])
                 encrypted_bytes = build_challenge_response(
-                    server_key[1], pump_public_key, challenge, bytes(public_key), SERVER_BLOB_TTL
+                    server_key[1], pump_public_key, challenge, server_pub, SERVER_BLOB_TTL
                 )
             else:
                 print("\n=== Getting Play Integrity Token ===")
@@ -466,7 +467,10 @@ async def main():
             await write_extended_char(client, CHAR_WRITE_CHALLENGE, encrypted_bytes)
             print("Challenge written successfully")
 
-            shared_key = compute_shared_key(private_key, pump_public_key)
+            if offline:
+                shared_key = server_shared_key(server_key[1], pump_public_key)
+            else:
+                shared_key = compute_shared_key(private_key, pump_public_key)
             cache_session(challenge, pump_public_key, server_nonce, shared_key)
             print_summary(
                 bt_address_bytes,

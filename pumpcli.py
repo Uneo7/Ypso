@@ -11,12 +11,15 @@ from pump.lock import lock_counters
 from pump.sdk import (
     build_start_payload,
     build_stop_payload,
+    build_tbr_start_payload,
+    build_tbr_stop_payload,
     extract_snapshot,
     fetch_basal,
     fetch_history,
     fetch_status,
     load_session,
     send_bolus_payload,
+    send_tbr_payload,
     watch_notifications,
 )
 
@@ -38,9 +41,15 @@ def parse_args():
     sub.add_parser("status", help="Lire statut bolus/système")
     sub.add_parser("basal", help="Lire profil basal actif et programmes A/B")
 
-    for name in ["events", "alerts", "system"]:
+    tbr_start = sub.add_parser("tbr-start", help="Démarrer un TBR (Temporary Basal Rate)")
+    tbr_start.add_argument("--percent", type=int, required=True, help="Pourcentage du basal (0-200)")
+    tbr_start.add_argument("--duration", type=int, default=30, help="Durée en minutes (15-1440, défaut: 30)")
+
+    sub.add_parser("tbr-stop", help="Arrêter le TBR en cours")
+
+    for name in ["events", "alerts", "system", "complaints"]:
         parser_hist = sub.add_parser(name, help=f"Lire historique {name}")
-        parser_hist.add_argument("--limit", type=int, help="Limiter le nombre d’entrées")
+        parser_hist.add_argument("--limit", type=int, help="Limiter le nombre d'entrées")
         parser_hist.add_argument("--output", help="Fichier de sortie JSON")
 
     notify = sub.add_parser("notify", help="Écouter les notifications bolus")
@@ -75,6 +84,18 @@ async def run_status(pump, cryptor):
 async def run_basal(pump, cryptor):
     result = await fetch_basal(pump, cryptor)
     print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+async def run_tbr_start(args, pump, cryptor):
+    payload = build_tbr_start_payload(args.percent, args.duration)
+    await send_tbr_payload(pump, payload, cryptor)
+    print(f"TBR started: {args.percent}% for {args.duration} minutes.")
+
+
+async def run_tbr_stop(pump, cryptor):
+    payload = build_tbr_stop_payload()
+    await send_tbr_payload(pump, payload, cryptor)
+    print("TBR stopped.")
 
 
 async def run_history(kind: str, args, pump, cryptor):
@@ -129,7 +150,11 @@ def main():
                 asyncio.run(run_status(pump, cryptor))
             elif args.command == "basal":
                 asyncio.run(run_basal(pump, cryptor))
-            elif args.command in ("events", "alerts", "system"):
+            elif args.command == "tbr-start":
+                asyncio.run(run_tbr_start(args, pump, cryptor))
+            elif args.command == "tbr-stop":
+                asyncio.run(run_tbr_stop(pump, cryptor))
+            elif args.command in ("events", "alerts", "system", "complaints"):
                 asyncio.run(run_history(args.command, args, pump, cryptor))
             elif args.command == "notify":
                 asyncio.run(run_notify(args, pump, cryptor))

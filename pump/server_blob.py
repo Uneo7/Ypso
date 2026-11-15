@@ -1,5 +1,6 @@
 import os
 import struct
+import time
 
 from nacl.bindings import (
     crypto_scalarmult,
@@ -54,8 +55,16 @@ def build_challenge_response(
     challenge: bytes,
     app_pub: bytes,
     ttl: int,
-    counter: int = 1,
+    counter: int | None = None,
 ) -> bytes:
+    # The firmware validates the trailing 8-byte counter: it must be STRICTLY
+    # GREATER than the counter the pump currently stores for this char (type-1
+    # pairing char, counter-only trailer). A hard-coded counter=1 is rejected
+    # with GATT 0x8B ("Counter error") on any pump paired before (stored counter
+    # already > 1). Default to epoch-ms: monotonic across pairings/reboots and
+    # always above any value the pump could hold, while staying < 2**63.
+    if counter is None:
+        counter = int(time.time() * 1000)
     if len(challenge) != 32 or len(app_pub) != 32:
         raise ValueError("challenge and app_pub must be 32 bytes")
     key = server_shared_key(server_priv, pump_pub)

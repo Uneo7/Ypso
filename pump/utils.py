@@ -2,14 +2,27 @@ import hashlib
 
 from bleak import BleakClient
 
-from .constants import CHAR_AUTH_PASSWORD, CHAR_EXTENDED_READ
+from .constants import AUTH_SALTS, CHAR_AUTH_PASSWORD, CHAR_EXTENDED_READ
 
 
-def compute_password(mac: str) -> bytes:
-    salt = bytes([0x4F, 0xC2, 0x45, 0x4D, 0x9B, 0x81, 0x59, 0xA4, 0x93, 0xBB])
+def compute_password(mac: str, level=2) -> bytes:
+    """MD5 password for CHAR_AUTH_PASSWORD.
+
+    `level` is the access level the firmware implements: 1, 2 or 3 (see
+    AUTH_SALTS in constants). 2 is ordinary application access and stays the
+    default; 3 is needed for the test service's memory characteristics and
+    for clearing the history. The names "app" (= 2) and "test" (= 3) are
+    still accepted.
+    """
+    try:
+        salt = AUTH_SALTS[level]
+    except KeyError:
+        raise ValueError(
+            f"unknown auth level {level!r}, expected one of "
+            f"{sorted(AUTH_SALTS, key=repr)}"
+        ) from None
     mac_bytes = bytes.fromhex(mac.replace(":", ""))
-    buf = mac_bytes + salt
-    return hashlib.md5(buf).digest()
+    return hashlib.md5(mac_bytes + salt).digest()
 
 
 def chunk_payload(data: bytes):
