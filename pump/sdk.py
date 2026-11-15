@@ -19,6 +19,7 @@ from .constants import (
     CHAR_SYSTEM_DATE,
     CHAR_SYSTEM_STATUS,
     CHAR_SYSTEM_TIME,
+    CHAR_TBR_START_STOP,
     ENTRY_CONFIG,
 )
 from .crc import crc16, crc16_valid
@@ -109,6 +110,33 @@ async def send_bolus_payload(pump: dict, payload: bytes, cryptor: Optional[PumpC
     async with authenticated_client(pump) as client:
         for frame in frames:
             await client.write_gatt_char(CHAR_BOLUS_START_STOP, frame, response=True)
+
+
+def build_tbr_start_payload(tbr_percent: int, duration_min: int = 30) -> bytes:
+    if not (0 <= tbr_percent <= 200):
+        raise ValueError("TBR percent must be between 0 and 200")
+    if not (15 <= duration_min <= 1440):
+        raise ValueError("TBR duration must be between 15 and 1440 minutes")
+    return (
+        tbr_percent.to_bytes(4, "little", signed=False)
+        + (~tbr_percent & 0xFFFFFFFF).to_bytes(4, "little", signed=False)
+        + duration_min.to_bytes(4, "little", signed=False)
+        + (~duration_min & 0xFFFFFFFF).to_bytes(4, "little", signed=False)
+    )
+
+
+def build_tbr_stop_payload() -> bytes:
+    return b"\x00" * 16
+
+
+async def send_tbr_payload(pump: dict, payload: bytes, cryptor: Optional[PumpCryptor]):
+    framed = payload + crc16(payload)
+    if cryptor:
+        framed = cryptor.encrypt(framed)
+    frames = chunk_payload(framed)
+    async with authenticated_client(pump) as client:
+        for frame in frames:
+            await client.write_gatt_char(CHAR_TBR_START_STOP, frame, response=True)
 
 
 async def write_index_glb(client, uuid: str, value: int, cryptor: Optional[PumpCryptor]):

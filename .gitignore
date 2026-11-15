@@ -1,1 +1,5 @@
 __pycache__
+ypsopump_keys.json
+ypsopump_keys.json.*
+ypsopump_keys.lock
+.venv/

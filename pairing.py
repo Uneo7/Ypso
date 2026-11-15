@@ -11,8 +11,8 @@ from bleak import BleakScanner, BleakClient
 from bleak.exc import BleakError
 from nacl.public import PrivateKey
 from nacl.encoding import HexEncoder
-from nacl.bindings import crypto_scalarmult
-from proto import keyexchange_pb2, keyexchange_pb2_grpc
+from nacl.bindings import crypto_scalarmult, crypto_scalarmult_base
+from proto import encrypt_key_pb2, encrypt_key_pb2_grpc
 
 try:
     pass
@@ -23,12 +23,23 @@ except ImportError:
     sys.exit(1)
 
 from device_profiles import DEVICE_PROFILES, APP_INFO, CURRENT_DEVICE
-from pump.cache import load_cache, save_cache, PumpCacheError
 from pump.constants import CHAR_AUTH_PASSWORD, CHAR_MASTER_VERSION, CHAR_BASE_VERSION, CHAR_SETTINGS_VERSION, CHAR_HISTORY_VERSION
 from pump.utils import compute_password
+from pump.server_blob import build_challenge_response, server_shared_key
 
 SALT = bytes([0x4F, 0xC2, 0x45, 0x4D, 0x9B, 0x81, 0x59, 0xA4, 0x93, 0xBB])
 KEY_FILE = Path("ypsopump_keys.json")
+SERVER_BLOB_TTL = 28 * 24 * 3600
+
+
+def load_server_key():
+    if not KEY_FILE.exists():
+        return None
+    sk = (json.loads(KEY_FILE.read_text()).get("server_key") or {})
+    hexkey = sk.get("private_key") or sk.get("privateKeyHex")
+    if not hexkey or "<" in hexkey:
+        return None
+    return sk.get("slot", 0), bytes.fromhex(hexkey)
 
 SERVICE_CRYPTO = "fb349b5f-8000-0080-0010-0000feda0002"
 CHAR_REQUEST_PUBLIC_KEY = "669a0c20-0008-969e-e211-fcff0000000a"
@@ -149,16 +160,16 @@ def load_or_generate_keys():
 
 
 def update_pump_cache(**updates):
-    from pump.cache import save_cache
-    try:
-        data, _ = load_cache(allow_expired=True)
-    except PumpCacheError:
-        data = {}
+    if not KEY_FILE.exists():
+        return
+    with open(KEY_FILE) as f:
+        data = json.load(f)
     pump = data.get("pump") or {}
     for key, value in updates.items():
         pump[key] = value
     data["pump"] = pump
-    save_cache(data)
+    with open(KEY_FILE, "w") as f:
+        json.dump(data, f)
 
 
 def load_cached_session(pump_info):
@@ -210,7 +221,7 @@ def _hex(data: bytes) -> str:
 
 def encrypt_key_request(bt_address, server_nonce, challenge, pump_pubkey, app_pubkey, token):
     device = DEVICE_PROFILES[CURRENT_DEVICE]
-    metrics = keyexchange_pb2.Metrics(
+    metrics = encrypt_key_pb2.Metrics(
         platform=device["platform"],
         model=device["model"],
         os_type=device["os_type"],
@@ -222,7 +233,7 @@ def encrypt_key_request(bt_address, server_nonce, challenge, pump_pubkey, app_pu
         library_version=APP_INFO["library_version"],
         xamarin=APP_INFO["xamarin"]
     )
-    request = keyexchange_pb2.EncryptKeyRequest(
+    request = encrypt_key_pb2.EncryptKeyRequest(
         challenge=_hex(challenge),
         pump_public_key=_hex(pump_pubkey),
         app_public_key=_hex(app_pubkey),
@@ -236,7 +247,7 @@ def encrypt_key_request(bt_address, server_nonce, challenge, pump_pubkey, app_pu
         grpc.ssl_channel_credentials()
     )
     try:
-        stub = keyexchange_pb2_grpc.EncryptKeyStub(channel)
+        stub = encrypt_key_pb2_grpc.EncryptKeyStub(channel)
         response = stub.Send(request)
         return bytes.fromhex(response.encrypted_bytes)
     finally:
@@ -256,13 +267,13 @@ def get_server_nonce(bt_address, device_id):
         grpc.ssl_channel_credentials()
     )
 
-    stub = keyexchange_pb2_grpc.NonceRequestStub(channel)
+    stub = encrypt_key_pb2_grpc.NonceRequestStub(channel)
 
     # Get device profile
     device = DEVICE_PROFILES[CURRENT_DEVICE]
 
     # Build metrics matching official app
-    metrics = keyexchange_pb2.Metrics(
+    metrics = encrypt_key_pb2.Metrics(
         platform=device["platform"],
         model=device["model"],
         os_type=device["os_type"],
@@ -275,7 +286,7 @@ def get_server_nonce(bt_address, device_id):
         xamarin=APP_INFO["xamarin"]
     )
 
-    request = keyexchange_pb2.DeviceIdentifier(
+    request = encrypt_key_pb2.DeviceIdentifier(
         device_id=device_id,
         bt_address=bt_address.hex(),
         metrics=metrics
@@ -372,13 +383,19 @@ async def main():
         print(f"BT Address: {bt_address_bytes.hex()}")
         print(f"\nApp Public Key: {public_key.encode(encoder=HexEncoder).decode()}")
 
-        print("\n=== Calling Ypsomed Server ===")
-        try:
-            server_nonce = get_server_nonce(bt_address_bytes, device_id)
-            print(f"Server Nonce (24 bytes): {server_nonce.hex()}")
-        except Exception as e:
-            print(f"Server call failed: {e}")
-            return False
+        server_key = load_server_key()
+        offline = server_key is not None
+        server_nonce = b""
+        if offline:
+            print(f"\n=== Offline pairing (server key slot {server_key[0]}) ===")
+        else:
+            print("\n=== Calling Ypsomed Server ===")
+            try:
+                server_nonce = get_server_nonce(bt_address_bytes, device_id)
+                print(f"Server Nonce (24 bytes): {server_nonce.hex()}")
+            except Exception as e:
+                print(f"Server call failed: {e}")
+                return False
 
         async with BleakClient(current_ble_address) as client:
             print(f"Connected ({current_ble_address}): {client.is_connected}")
@@ -420,30 +437,40 @@ async def main():
             print(f"\nChallenge (32 bytes):\n{challenge.hex()}")
             print(f"\nPump Public Key (32 bytes):\n{pump_public_key.hex()}")
 
-            print("\n=== Getting Play Integrity Token ===")
-            try:
-                token = get_play_integrity_token(server_nonce.hex())
-                print(f"Token (truncated): {token[:80]}...")
-            except Exception as e:
-                print(f"Failed to obtain Play Integrity token: {e}")
-                return False
-
-            print("\n=== Calling EncryptKey ===")
-            try:
-                encrypted_bytes = encrypt_key_request(
-                    bt_address_bytes, server_nonce, challenge, pump_public_key,
-                    bytes(public_key), token
+            if offline:
+                print("\n=== Building Challenge Response (offline) ===")
+                server_pub = crypto_scalarmult_base(server_key[1])
+                encrypted_bytes = build_challenge_response(
+                    server_key[1], pump_public_key, challenge, server_pub, SERVER_BLOB_TTL
                 )
-            except Exception as e:
-                print(f"EncryptKey call failed: {e}")
-                return False
-            print(f"Encrypted Payload (116 bytes): {encrypted_bytes.hex()}")
+            else:
+                print("\n=== Getting Play Integrity Token ===")
+                try:
+                    token = get_play_integrity_token(server_nonce.hex())
+                    print(f"Token (truncated): {token[:80]}...")
+                except Exception as e:
+                    print(f"Failed to obtain Play Integrity token: {e}")
+                    return False
+
+                print("\n=== Calling EncryptKey ===")
+                try:
+                    encrypted_bytes = encrypt_key_request(
+                        bt_address_bytes, server_nonce, challenge, pump_public_key,
+                        bytes(public_key), token
+                    )
+                except Exception as e:
+                    print(f"EncryptKey call failed: {e}")
+                    return False
+            print(f"Encrypted Payload ({len(encrypted_bytes)} bytes): {encrypted_bytes.hex()}")
 
             print("\n=== Writing Challenge Response ===")
             await write_extended_char(client, CHAR_WRITE_CHALLENGE, encrypted_bytes)
             print("Challenge written successfully")
 
-            shared_key = compute_shared_key(private_key, pump_public_key)
+            if offline:
+                shared_key = server_shared_key(server_key[1], pump_public_key)
+            else:
+                shared_key = compute_shared_key(private_key, pump_public_key)
             cache_session(challenge, pump_public_key, server_nonce, shared_key)
             print_summary(
                 bt_address_bytes,

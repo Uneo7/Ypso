@@ -25,10 +25,24 @@ message EncryptKeyRequest {
   Metrics metrics = 7;
 }
 
+message DeviceIdentifier {
+    string device_id = 1;
+    string bt_address = 2;
+    Metrics metrics = 3;
+}
+
 message EncryptKeyResponse {
   string encrypted_bytes = 1;
 }
 
 service EncryptKey {
   rpc Send(EncryptKeyRequest) returns (EncryptKeyResponse);
+}
+
+message ServerNonce {
+    string server_nonce = 1;
+}
+
+service NonceRequest {
+    rpc Send(DeviceIdentifier) returns (ServerNonce);
 }
